@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chat testen</title>
+  <style>
+    body { max-width: 640px; margin: 3rem auto; padding: 0 1rem; font: 16px/1.5 system-ui, sans-serif; color: #202923; }
+    h1 { margin-bottom: 0.25rem; }
+    #status { color: #8a3d31; }
+    #status.connected { color: #26734d; }
+    form { display: flex; gap: 0.5rem; margin: 1.5rem 0; }
+    input { flex: 1; min-width: 0; padding: 0.65rem; }
+    button { padding: 0.65rem 1rem; }
+    #messages { padding-left: 1.25rem; }
+    #messages li { overflow-wrap: anywhere; margin: 0.5rem 0; }
+  </style>
+</head>
+<body>
+  <h1>Chat</h1>
+  <p id="status" role="status">Verbinde mit localhost:3000 ...</p>
+  <form id="chat-form">
+    <input id="msg" autocomplete="off" placeholder="Nachricht schreiben" aria-label="Nachricht">
+    <button type="submit">Senden</button>
+  </form>
+  <ul id="messages"></ul>
+
+  <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+
+  <script>
+    const socket = io('http://localhost:3000');
+    const status = document.getElementById('status');
+
+    socket.on('connect', () => {
+      status.textContent = `Verbunden als ${socket.id}`;
+      status.classList.add('connected');
+    });
+
+    socket.on('disconnect', () => {
+      status.textContent = 'Verbindung getrennt';
+      status.classList.remove('connected');
+    });
+
+    socket.on('receivedMessage', (data) => {
+      const li = document.createElement('li');
+      li.textContent = `${data.user}: ${data.message}`;
+      document.getElementById('messages').appendChild(li);
+    });
+
+    document.getElementById('chat-form').addEventListener('submit', (event) => {
+      event.preventDefault();
+      const input = document.getElementById('msg');
+      const message = input.value.trim();
+      if (!message || !socket.connected) return;
+
+      socket.emit('sendMessage', message);
+      input.value = '';
+      input.focus();
+    });
+  </script>
+</body>
+</html>
