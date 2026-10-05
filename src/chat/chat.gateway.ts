@@ -21,11 +21,17 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
   @SubscribeMessage('sendMessage')
   handleMessage(
-    @MessageBody() message: string,
+    @MessageBody() payload: { user?: string; message?: string } | string,
     @ConnectedSocket() client: Socket,
   ) {
-    console.log(`Message received from client ${client.id}: ${message}`);
+    const user = typeof payload === 'string' ? undefined : payload.user;
+    const message = typeof payload === 'string' ? payload : payload.message;
 
-    this.server.emit('receivedMessage', { user: client.id, message });
+    if (typeof message !== 'string' || !message.trim()) return;
+
+    const sender = typeof user === 'string' && user.trim() ? user.trim() : client.id;
+    console.log(`Message received from ${sender}: ${message}`);
+
+    this.server.emit('receivedMessage', { user: sender, message: message.trim() });
   }
 }

@@ -21,11 +21,23 @@ describe('ChatGateway', () => {
     const emit = vi.fn();
     gateway.server = { emit } as unknown as Server;
 
-    gateway.handleMessage('Hallo zusammen', { id: 'client-1' } as Socket);
+    gateway.handleMessage(
+      { user: 'Anna', message: 'Hallo zusammen' },
+      { id: 'client-1' } as Socket,
+    );
 
     expect(emit).toHaveBeenCalledWith('receivedMessage', {
-      user: 'client-1',
+      user: 'Anna',
       message: 'Hallo zusammen',
     });
+  });
+
+  it('ignores empty messages', () => {
+    const emit = vi.fn();
+    gateway.server = { emit } as unknown as Server;
+
+    gateway.handleMessage({ user: 'Anna', message: '  ' }, { id: 'client-1' } as Socket);
+
+    expect(emit).not.toHaveBeenCalled();
   });
 });

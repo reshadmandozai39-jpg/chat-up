@@ -11,6 +11,7 @@
     #status.connected { color: #26734d; }
     form { display: flex; gap: 0.5rem; margin: 1.5rem 0; }
     input { flex: 1; min-width: 0; padding: 0.65rem; }
+    #name { flex: 0 1 9rem; }
     button { padding: 0.65rem 1rem; }
     #messages { padding-left: 1.25rem; }
     #messages li { overflow-wrap: anywhere; margin: 0.5rem 0; }
@@ -20,6 +21,7 @@
   <h1>Chat</h1>
   <p id="status" role="status">Verbinde mit localhost:3000 ...</p>
   <form id="chat-form">
+    <input id="name" maxlength="40" placeholder="Dein Name" aria-label="Dein Name">
     <input id="msg" autocomplete="off" placeholder="Nachricht schreiben" aria-label="Nachricht">
     <button type="submit">Senden</button>
   </form>
@@ -32,7 +34,7 @@
     const status = document.getElementById('status');
 
     socket.on('connect', () => {
-      status.textContent = `Verbunden als ${socket.id}`;
+      status.textContent = 'Verbunden';
       status.classList.add('connected');
     });
 
@@ -53,7 +55,8 @@
       const message = input.value.trim();
       if (!message || !socket.connected) return;
 
-      socket.emit('sendMessage', message);
+      const user = document.getElementById('name').value.trim() || 'Unbekannt';
+      socket.emit('sendMessage', { user, message });
       input.value = '';
       input.focus();
     });
