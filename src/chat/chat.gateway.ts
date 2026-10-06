@@ -21,7 +21,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
   @SubscribeMessage('sendMessage')
   handleMessage(
-    @MessageBody() payload: { user?: string; message?: string } | string,
+    @MessageBody() payload: { user?: string; message?: string, room?: String } ,
     @ConnectedSocket() client: Socket,
   ) {
     const user = typeof payload === 'string' ? undefined : payload.user;
@@ -31,7 +31,16 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
     const sender = typeof user === 'string' && user.trim() ? user.trim() : client.id;
     console.log(`Message received from ${sender}: ${message}`);
+    
+    const room = 'alice-bob';
+    client.join(room);
 
-    this.server.emit('receivedMessage', { user: sender, message: message.trim() });
+
+    this.server.to(room).emit('receivedMessage', {
+  user: sender,
+  message: payload.message?.trim(),
+});
+
+    
   }
 }

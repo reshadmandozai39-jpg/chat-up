@@ -56,7 +56,22 @@
       if (!message || !socket.connected) return;
 
       const user = document.getElementById('name').value.trim() || 'Unbekannt';
-      socket.emit('sendMessage', { user, message });
+
+const currentCurrent = 'alice';
+const otherCurrent = 'bob';
+
+const room = ['alice', 'bob']
+  .sort()
+  .join('-');
+
+socket.emit('sendMessage', {
+  user: currentCurrent,
+  room,
+  message: pa,
+});
+
+
+socket.on('receivedMessage', { user: currentCurrent, other: otherCurent, message, room: room });
       input.value = '';
       input.focus();
     });
