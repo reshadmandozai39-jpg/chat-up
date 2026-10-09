@@ -34,7 +34,9 @@
     #messages li.other { align-self: flex-start; background: #fff; }
     #messages .sender { display: block; margin-bottom: 0.15rem; color: #167b68; font-size: 0.78rem; font-weight: 700; }
     #messages li.own .sender { display: none; }
-    #messages .message-meta { display: block; margin-top: 0.1rem; color: #76817a; text-align: right; font-size: 0.7rem; }
+    #messages .message-meta { display: flex; justify-content: flex-end; align-items: center; gap: 0.3rem; margin-top: 0.1rem; color: #76817a; font-size: 0.7rem; }
+    #messages .receipt { color: #7b8580; font-size: 0.9rem; font-weight: 700; }
+    #messages .receipt.seen { color: #168c52; }
     #chat-form { display: flex; gap: 0.55rem; padding: 0.65rem; background: #f5f6f3; }
     #msg { flex: 1; border-radius: 20px; padding-inline: 1rem; }
     #chat-form button { min-width: 5.2rem; border-radius: 20px; }
@@ -84,9 +86,23 @@
     let activeUser = '';
     let activePeer = '';
 
+    function markIncomingMessagesAsRead() {
+      if (document.visibilityState !== 'visible') return;
+
+      const unreadMessages = document.querySelectorAll(
+        '#messages li.other[data-message-id]:not([data-read-receipt-sent])',
+      );
+      unreadMessages.forEach((item) => {
+        item.dataset.readReceiptSent = 'true';
+        socket.emit('messageRead', { messageId: item.dataset.messageId });
+      });
+    }
+
+    document.addEventListener('visibilitychange', markIncomingMessagesAsRead);
+
     socket.on('connect', () => {
       status.classList.add('connected');
-      if (activeRoom) socket.emit('joinRoom', activeRoom);
+      if (activeRoom) socket.emit('joinRoom', { room: activeRoom, user: activeUser });
       else status.textContent = 'Verbunden. Bitte einen Raum betreten.';
     });
 
@@ -121,25 +137,51 @@
       }
       const li = document.createElement('li');
       li.className = data.senderId === socket.id ? 'own' : 'other';
+      li.dataset.messageId = data.messageId;
       const sender = document.createElement('span');
       sender.className = 'sender';
       sender.textContent = data.user;
       const message = document.createElement('span');
       message.textContent = data.message;
       const time = document.createElement('span');
-      time.className = 'message-meta';
+      time.className = 'message-time';
       time.textContent = new Intl.DateTimeFormat('de-DE', { hour: '2-digit', minute: '2-digit' }).format(new Date());
-      li.append(sender, message, time);
+      const meta = document.createElement('span');
+      meta.className = 'message-meta';
+      meta.appendChild(time);
+      if (data.senderId === socket.id) {
+        const receipt = document.createElement('span');
+        receipt.className = 'receipt';
+        receipt.dataset.messageId = data.messageId;
+        receipt.textContent = '✓✓';
+        receipt.setAttribute('aria-label', 'Zugestellt');
+        meta.appendChild(receipt);
+      }
+      li.append(sender, message, meta);
       const messages = document.getElementById('messages');
       messages.appendChild(li);
       messages.parentElement.scrollTop = messages.parentElement.scrollHeight;
+      if (data.senderId !== socket.id) markIncomingMessagesAsRead();
+    });
+
+    socket.on('messageRead', ({ messageId, readerId }) => {
+      if (readerId === socket.id) return;
+      const receipt = [...document.querySelectorAll('.receipt')]
+        .find((item) => item.dataset.messageId === messageId);
+      if (!receipt) return;
+      receipt.textContent = '✓✓';
+      receipt.classList.add('seen');
+      receipt.setAttribute('aria-label', 'Gelesen');
     });
 
     document.getElementById('room-form').addEventListener('submit', (event) => {
       event.preventDefault();
       if (!socket.connected) return;
       activeUser = document.getElementById('name').value.trim() || 'Unbekannt';
-      socket.emit('joinRoom', document.getElementById('room').value);
+      socket.emit('joinRoom', {
+        room: document.getElementById('room').value,
+        user: activeUser,
+      });
     });
 
     document.getElementById('chat-form').addEventListener('submit', (event) => {

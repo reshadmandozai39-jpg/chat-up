@@ -28,11 +28,12 @@ describe('ChatGateway', () => {
     );
 
     expect(to).toHaveBeenCalledWith('raum-1');
-    expect(emit).toHaveBeenCalledWith('receivedMessage', {
+    expect(emit).toHaveBeenCalledWith('receivedMessage', expect.objectContaining({
+      messageId: expect.any(String),
       senderId: 'client-1',
       user: 'Anna',
       message: 'Hallo zusammen',
-    });
+    }));
   });
 
   it('ignores empty messages', () => {
@@ -64,9 +65,13 @@ describe('ChatGateway', () => {
     const emit = vi.fn();
     const join = vi.fn();
     const rooms = new Map([['raum-1', new Set(['client-1', 'client-2'])]]);
-    gateway.server = { sockets: { adapter: { rooms } } } as unknown as Server;
+    const sockets = new Map([
+      ['client-1', { data: { user: 'Anna' } }],
+      ['client-2', { data: { user: 'Berta' } }],
+    ]);
+    gateway.server = { sockets: { adapter: { rooms }, sockets } } as unknown as Server;
 
-    await gateway.handleJoinRoom('raum-1', {
+    await gateway.handleJoinRoom({ room: 'raum-1', user: 'Carla' }, {
       id: 'client-3',
       data: {},
       join,
@@ -75,5 +80,43 @@ describe('ChatGateway', () => {
 
     expect(join).not.toHaveBeenCalled();
     expect(emit).toHaveBeenCalledWith('roomError', 'Dieser Raum ist bereits mit zwei Personen belegt.');
+  });
+
+  it('allows another tab for a participant already in the room', async () => {
+    const emit = vi.fn();
+    const join = vi.fn();
+    const rooms = new Map([['raum-1', new Set(['client-1', 'client-2'])]]);
+    const sockets = new Map([
+      ['client-1', { data: { user: 'Anna' } }],
+      ['client-2', { data: { user: 'Berta' } }],
+    ]);
+    gateway.server = { sockets: { adapter: { rooms }, sockets } } as unknown as Server;
+
+    await gateway.handleJoinRoom({ room: 'raum-1', user: 'Anna' }, {
+      id: 'client-3',
+      data: {},
+      join,
+      emit,
+    } as unknown as Socket);
+
+    expect(join).toHaveBeenCalledWith('raum-1');
+    expect(emit).toHaveBeenCalledWith('roomJoined', { room: 'raum-1' });
+  });
+
+  it('broadcasts read receipts only to the reader room', () => {
+    const emit = vi.fn();
+    const to = vi.fn(() => ({ emit }));
+    gateway.server = { to } as unknown as Server;
+
+    gateway.handleMessageRead(
+      { messageId: 'message-1' },
+      { id: 'client-2', data: { room: 'raum-1' } } as Socket,
+    );
+
+    expect(to).toHaveBeenCalledWith('raum-1');
+    expect(emit).toHaveBeenCalledWith('messageRead', {
+      messageId: 'message-1',
+      readerId: 'client-2',
+    });
   });
 });
