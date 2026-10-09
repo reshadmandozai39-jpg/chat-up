@@ -5,75 +5,151 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Chat testen</title>
   <style>
-    body { max-width: 640px; margin: 3rem auto; padding: 0 1rem; font: 16px/1.5 system-ui, sans-serif; color: #202923; }
-    h1 { margin-bottom: 0.25rem; }
-    #status { color: #8a3d31; }
-    #status.connected { color: #26734d; }
-    form { display: flex; gap: 0.5rem; margin: 1.5rem 0; }
-    input { flex: 1; min-width: 0; padding: 0.65rem; }
-    #name { flex: 0 1 9rem; }
-    button { padding: 0.65rem 1rem; }
-    #messages { padding-left: 1.25rem; }
-    #messages li { overflow-wrap: anywhere; margin: 0.5rem 0; }
+    :root {
+      color: #202923;
+      font: 16px/1.45 system-ui, sans-serif;
+      background: #dfe5e1;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; }
+    .chat { width: min(100%, 640px); height: 100dvh; min-height: 420px; margin: 0 auto; display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto; background: #efeae2; box-shadow: 0 0 24px #14282022; }
+    header { display: flex; align-items: center; gap: 0.8rem; padding: 0.7rem 1rem; color: #fff; background: #075e54; }
+    .avatar { display: grid; width: 3rem; aspect-ratio: 1; place-items: center; flex: 0 0 auto; border-radius: 50%; background: #d7e8d9; color: #075e54; font-size: 1.2rem; font-weight: 700; }
+    .heading { min-width: 0; }
+    h1 { overflow: hidden; margin: 0; font-size: 1.1rem; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+    #status { margin: 0.1rem 0 0; color: #d4e8e1; font-size: 0.82rem; }
+    #status.connected { color: #d4e8e1; }
+    #room-form { display: grid; grid-template-columns: minmax(6rem, 1fr) minmax(6rem, 1fr) auto; gap: 0.45rem; padding: 0.65rem; background: #f7f8f5; border-bottom: 1px solid #d9ded9; }
+    input, button { min-width: 0; min-height: 2.7rem; padding: 0.55rem 0.7rem; border: 1px solid #cbd4ce; border-radius: 5px; font: inherit; }
+    input { background: #fff; }
+    input:focus { outline: 2px solid #48a184; outline-offset: 1px; }
+    button { border-color: #087b67; color: #fff; background: #087b67; cursor: pointer; }
+    button:disabled { border-color: #b8c2bc; background: #b8c2bc; cursor: not-allowed; }
+    .conversation { min-height: 0; overflow-y: auto; padding: 1rem 0.75rem; background-color: #efeae2; background-image: radial-gradient(circle at 15px 18px, #d8d2c866 1px, transparent 1.8px), radial-gradient(circle at 38px 42px, #d8d2c855 1px, transparent 1.8px); background-size: 52px 52px; }
+    .today { width: fit-content; margin: 0 auto 1rem; padding: 0.35rem 0.8rem; border-radius: 7px; color: #59635e; background: #d8eaf0; font-size: 0.82rem; text-transform: uppercase; }
+    .room-note { margin: 0 0 1rem; padding: 0.7rem 0.8rem; border: 1px solid #e5d99c; border-radius: 7px; color: #625b3d; background: #fff4c6; text-align: center; font-size: 0.88rem; }
+    #messages { display: flex; flex-direction: column; gap: 0.45rem; margin: 0; padding: 0; list-style: none; }
+    #messages li { max-width: 84%; overflow-wrap: anywhere; padding: 0.55rem 0.7rem 0.35rem; border-radius: 8px; box-shadow: 0 1px 1px #14282018; }
+    #messages li.own { align-self: flex-end; background: #d9fdd3; }
+    #messages li.other { align-self: flex-start; background: #fff; }
+    #messages .sender { display: block; margin-bottom: 0.15rem; color: #167b68; font-size: 0.78rem; font-weight: 700; }
+    #messages li.own .sender { display: none; }
+    #messages .message-meta { display: block; margin-top: 0.1rem; color: #76817a; text-align: right; font-size: 0.7rem; }
+    #chat-form { display: flex; gap: 0.55rem; padding: 0.65rem; background: #f5f6f3; }
+    #msg { flex: 1; border-radius: 20px; padding-inline: 1rem; }
+    #chat-form button { min-width: 5.2rem; border-radius: 20px; }
+    @media (max-width: 460px) {
+      .chat { min-height: 100dvh; }
+      #room-form { grid-template-columns: 1fr 1fr; }
+      #room-form button { grid-column: 1 / -1; }
+      .conversation { padding-inline: 0.55rem; }
+    }
   </style>
 </head>
 <body>
-  <h1>Chat</h1>
-  <p id="status" role="status">Verbinde mit localhost:3000 ...</p>
-  <form id="chat-form">
-    <input id="name" maxlength="40" placeholder="Dein Name" aria-label="Dein Name">
-    <input id="msg" autocomplete="off" placeholder="Nachricht schreiben" aria-label="Nachricht">
-    <button type="submit">Senden</button>
-  </form>
-  <ul id="messages"></ul>
+  <main class="chat">
+    <header>
+      <div class="avatar" id="avatar" aria-hidden="true">C</div>
+      <div class="heading">
+        <h1 id="chat-title">Dein Chat</h1>
+        <p id="status" role="status">Verbinde mit dem Chat-Server ...</p>
+      </div>
+    </header>
+    <form id="room-form">
+      <input id="name" maxlength="40" placeholder="Dein Name" aria-label="Dein Name">
+      <input id="room" maxlength="40" placeholder="Raumname" aria-label="Raumname" value="raum-1" required>
+      <button type="submit">Raum betreten</button>
+    </form>
+    <section class="conversation" aria-label="Nachrichten">
+      <div class="today">Heute</div>
+      <p class="room-note">Teile den Raumnamen nur mit der Person, die du einladen möchtest.</p>
+      <ul id="messages" aria-live="polite"></ul>
+    </section>
+    <form id="chat-form">
+      <input id="msg" autocomplete="off" placeholder="Nachricht schreiben" aria-label="Nachricht" disabled>
+      <button type="submit" disabled>Senden</button>
+    </form>
+  </main>
 
   <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
 
   <script>
     const socket = io('http://localhost:3000');
     const status = document.getElementById('status');
+    const chatTitle = document.getElementById('chat-title');
+    const avatar = document.getElementById('avatar');
+    const messageInput = document.getElementById('msg');
+    const sendButton = document.querySelector('#chat-form button');
+    let activeRoom = '';
+    let activeUser = '';
+    let activePeer = '';
 
     socket.on('connect', () => {
-      status.textContent = 'Verbunden';
       status.classList.add('connected');
+      if (activeRoom) socket.emit('joinRoom', activeRoom);
+      else status.textContent = 'Verbunden. Bitte einen Raum betreten.';
     });
 
     socket.on('disconnect', () => {
       status.textContent = 'Verbindung getrennt';
       status.classList.remove('connected');
+      messageInput.disabled = true;
+      sendButton.disabled = true;
+    });
+
+    socket.on('roomJoined', ({ room }) => {
+      activeRoom = room;
+      activePeer = '';
+      chatTitle.textContent = room;
+      avatar.textContent = room.charAt(0).toUpperCase();
+      status.textContent = `Verbunden mit Raum: ${room}`;
+      messageInput.disabled = false;
+      sendButton.disabled = false;
+      document.getElementById('messages').replaceChildren();
+    });
+
+    socket.on('roomError', (message) => {
+      status.textContent = message;
+      status.classList.remove('connected');
     });
 
     socket.on('receivedMessage', (data) => {
+      if (data.senderId !== socket.id) {
+        activePeer = data.user;
+        chatTitle.textContent = activePeer;
+        avatar.textContent = activePeer.charAt(0).toUpperCase();
+      }
       const li = document.createElement('li');
-      li.textContent = `${data.user}: ${data.message}`;
-      document.getElementById('messages').appendChild(li);
+      li.className = data.senderId === socket.id ? 'own' : 'other';
+      const sender = document.createElement('span');
+      sender.className = 'sender';
+      sender.textContent = data.user;
+      const message = document.createElement('span');
+      message.textContent = data.message;
+      const time = document.createElement('span');
+      time.className = 'message-meta';
+      time.textContent = new Intl.DateTimeFormat('de-DE', { hour: '2-digit', minute: '2-digit' }).format(new Date());
+      li.append(sender, message, time);
+      const messages = document.getElementById('messages');
+      messages.appendChild(li);
+      messages.parentElement.scrollTop = messages.parentElement.scrollHeight;
+    });
+
+    document.getElementById('room-form').addEventListener('submit', (event) => {
+      event.preventDefault();
+      if (!socket.connected) return;
+      activeUser = document.getElementById('name').value.trim() || 'Unbekannt';
+      socket.emit('joinRoom', document.getElementById('room').value);
     });
 
     document.getElementById('chat-form').addEventListener('submit', (event) => {
       event.preventDefault();
-      const input = document.getElementById('msg');
-      const message = input.value.trim();
-      if (!message || !socket.connected) return;
+      const message = messageInput.value.trim();
+      if (!message || !socket.connected || !activeRoom) return;
 
-      const user = document.getElementById('name').value.trim() || 'Unbekannt';
-
-const currentCurrent = 'alice';
-const otherCurrent = 'bob';
-
-const room = ['alice', 'bob']
-  .sort()
-  .join('-');
-
-socket.emit('sendMessage', {
-  user: currentCurrent,
-  room,
-  message: pa,
-});
-
-
-socket.on('receivedMessage', { user: currentCurrent, other: otherCurent, message, room: room });
-      input.value = '';
-      input.focus();
+      socket.emit('sendMessage', { user: activeUser, message });
+      messageInput.value = '';
+      messageInput.focus();
     });
   </script>
 </body>
