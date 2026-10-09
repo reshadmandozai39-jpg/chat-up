@@ -19,7 +19,11 @@
     h1 { overflow: hidden; margin: 0; font-size: 1.1rem; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
     #status { margin: 0.1rem 0 0; color: #d4e8e1; font-size: 0.82rem; }
     #status.connected { color: #d4e8e1; }
-    #room-form { display: grid; grid-template-columns: minmax(6rem, 1fr) minmax(6rem, 1fr) auto; gap: 0.45rem; padding: 0.65rem; background: #f7f8f5; border-bottom: 1px solid #d9ded9; }
+    #status.error { color: #ffd1c7; }
+    #room-form { display: grid; gap: 0.55rem; padding: 0.65rem; background: #f7f8f5; border-bottom: 1px solid #d9ded9; }
+    .profile-fields { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.45rem; }
+    .room-controls { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 0.45rem; }
+    .field { display: grid; min-width: 0; gap: 0.2rem; color: #526158; font-size: 0.75rem; font-weight: 650; }
     input, button { min-width: 0; min-height: 2.7rem; padding: 0.55rem 0.7rem; border: 1px solid #cbd4ce; border-radius: 5px; font: inherit; }
     input { background: #fff; }
     input:focus { outline: 2px solid #48a184; outline-offset: 1px; }
@@ -35,15 +39,16 @@
     #messages .sender { display: block; margin-bottom: 0.15rem; color: #167b68; font-size: 0.78rem; font-weight: 700; }
     #messages li.own .sender { display: none; }
     #messages .message-meta { display: flex; justify-content: flex-end; align-items: center; gap: 0.3rem; margin-top: 0.1rem; color: #76817a; font-size: 0.7rem; }
-    #messages .receipt { color: #7b8580; font-size: 0.9rem; font-weight: 700; }
+    #messages .receipt { color: #168c52; font-size: 0.9rem; font-weight: 700; }
     #messages .receipt.seen { color: #168c52; }
     #chat-form { display: flex; gap: 0.55rem; padding: 0.65rem; background: #f5f6f3; }
     #msg { flex: 1; border-radius: 20px; padding-inline: 1rem; }
     #chat-form button { min-width: 5.2rem; border-radius: 20px; }
-    @media (max-width: 460px) {
+    @media (max-width: 520px) {
       .chat { min-height: 100dvh; }
-      #room-form { grid-template-columns: 1fr 1fr; }
-      #room-form button { grid-column: 1 / -1; }
+      .profile-fields { grid-template-columns: 1fr 1fr; }
+      .field.email { grid-column: 1 / -1; }
+      .room-controls { grid-template-columns: 1fr; }
       .conversation { padding-inline: 0.55rem; }
     }
   </style>
@@ -58,9 +63,23 @@
       </div>
     </header>
     <form id="room-form">
-      <input id="name" maxlength="40" placeholder="Dein Name" aria-label="Dein Name">
-      <input id="room" maxlength="40" placeholder="Raumname" aria-label="Raumname" value="raum-1" required>
-      <button type="submit">Raum betreten</button>
+      <div class="profile-fields">
+        <label class="field">Vorname
+          <input id="first-name" maxlength="40" autocomplete="given-name" required>
+        </label>
+        <label class="field">Nachname
+          <input id="last-name" maxlength="60" autocomplete="family-name" required>
+        </label>
+        <label class="field email">E-Mail
+          <input id="email" type="email" maxlength="254" autocomplete="email" required>
+        </label>
+      </div>
+      <div class="room-controls">
+        <label class="field">Raum
+          <input id="room" maxlength="40" value="raum-1" required>
+        </label>
+        <button type="submit">Raum betreten</button>
+      </div>
     </form>
     <section class="conversation" aria-label="Nachrichten">
       <div class="today">Heute</div>
@@ -84,7 +103,11 @@
     const sendButton = document.querySelector('#chat-form button');
     let activeRoom = '';
     let activeUser = '';
+    let activeUserId = null;
     let activePeer = '';
+    let historyLoaded = false;
+    let pendingMessages = [];
+    let pendingMessageText = '';
 
     function markIncomingMessagesAsRead() {
       if (document.visibilityState !== 'visible') return;
@@ -109,35 +132,41 @@
     socket.on('disconnect', () => {
       status.textContent = 'Verbindung getrennt';
       status.classList.remove('connected');
+      status.classList.add('error');
       messageInput.disabled = true;
       sendButton.disabled = true;
     });
 
-    socket.on('roomJoined', ({ room }) => {
+    socket.on('roomJoined', ({ room, userId }) => {
       activeRoom = room;
+      activeUserId = userId;
       activePeer = '';
+      historyLoaded = false;
+      pendingMessages = [];
       chatTitle.textContent = room;
       avatar.textContent = room.charAt(0).toUpperCase();
-      status.textContent = `Verbunden mit Raum: ${room}`;
-      messageInput.disabled = false;
-      sendButton.disabled = false;
+      status.textContent = 'Lade gespeicherte Nachrichten ...';
+      status.classList.remove('error');
+      messageInput.disabled = true;
+      sendButton.disabled = true;
       document.getElementById('messages').replaceChildren();
     });
 
-    socket.on('roomError', (message) => {
-      status.textContent = message;
-      status.classList.remove('connected');
-    });
+    function renderMessage(data) {
+      const messages = document.getElementById('messages');
+      const messageId = String(data.messageId);
+      if ([...messages.children].some((item) => item.dataset.messageId === messageId)) return;
 
-    socket.on('receivedMessage', (data) => {
-      if (data.senderId !== socket.id) {
+      const own = String(data.userId) === String(activeUserId)
+        || (!data.userId && data.senderId === socket.id);
+      if (!own) {
         activePeer = data.user;
         chatTitle.textContent = activePeer;
         avatar.textContent = activePeer.charAt(0).toUpperCase();
       }
       const li = document.createElement('li');
-      li.className = data.senderId === socket.id ? 'own' : 'other';
-      li.dataset.messageId = data.messageId;
+      li.className = own ? 'own' : 'other';
+      li.dataset.messageId = messageId;
       const sender = document.createElement('span');
       sender.className = 'sender';
       sender.textContent = data.user;
@@ -145,23 +174,76 @@
       message.textContent = data.message;
       const time = document.createElement('span');
       time.className = 'message-time';
-      time.textContent = new Intl.DateTimeFormat('de-DE', { hour: '2-digit', minute: '2-digit' }).format(new Date());
+      time.textContent = new Intl.DateTimeFormat('de-DE', { hour: '2-digit', minute: '2-digit' })
+        .format(new Date(data.createdAt || Date.now()));
       const meta = document.createElement('span');
       meta.className = 'message-meta';
       meta.appendChild(time);
-      if (data.senderId === socket.id) {
+      if (own) {
         const receipt = document.createElement('span');
         receipt.className = 'receipt';
-        receipt.dataset.messageId = data.messageId;
-        receipt.textContent = '✓✓';
-        receipt.setAttribute('aria-label', 'Zugestellt');
+        receipt.dataset.messageId = messageId;
+        receipt.textContent = '✓';
+        receipt.title = 'In der Datenbank gespeichert';
+        receipt.setAttribute('aria-label', 'In der Datenbank gespeichert');
         meta.appendChild(receipt);
       }
       li.append(sender, message, meta);
-      const messages = document.getElementById('messages');
       messages.appendChild(li);
       messages.parentElement.scrollTop = messages.parentElement.scrollHeight;
-      if (data.senderId !== socket.id) markIncomingMessagesAsRead();
+      if (!own) markIncomingMessagesAsRead();
+    }
+
+    socket.on('messageHistory', (history) => {
+      history.forEach(renderMessage);
+      pendingMessages.forEach(renderMessage);
+      pendingMessages = [];
+      historyLoaded = true;
+      messageInput.disabled = false;
+      sendButton.disabled = false;
+      status.textContent = `Verbunden mit Raum: ${activeRoom}`;
+      status.classList.remove('error');
+      markIncomingMessagesAsRead();
+    });
+
+    socket.on('messageHistoryError', (message) => {
+      historyLoaded = true;
+      pendingMessages.forEach(renderMessage);
+      pendingMessages = [];
+      messageInput.disabled = false;
+      sendButton.disabled = false;
+      status.textContent = `${message} Neue Nachrichten können weiterhin gesendet werden.`;
+      status.classList.add('error');
+    });
+
+    socket.on('roomError', (message) => {
+      status.textContent = message;
+      status.classList.add('error');
+    });
+
+    socket.on('receivedMessage', (data) => {
+      if (!historyLoaded) {
+        pendingMessages.push(data);
+        return;
+      }
+      renderMessage(data);
+      if (String(data.userId) === String(activeUserId)) {
+        pendingMessageText = '';
+        messageInput.value = '';
+        messageInput.disabled = false;
+        sendButton.disabled = false;
+        status.textContent = `In der Datenbank gespeichert · ${activeRoom}`;
+      }
+    });
+
+    socket.on('messageError', (message) => {
+      status.textContent = message;
+      status.classList.add('error');
+      messageInput.value = pendingMessageText;
+      pendingMessageText = '';
+      messageInput.disabled = false;
+      sendButton.disabled = false;
+      messageInput.focus();
     });
 
     socket.on('messageRead', ({ messageId, readerId }) => {
@@ -171,16 +253,20 @@
       if (!receipt) return;
       receipt.textContent = '✓✓';
       receipt.classList.add('seen');
+      receipt.title = 'Gelesen';
       receipt.setAttribute('aria-label', 'Gelesen');
     });
 
     document.getElementById('room-form').addEventListener('submit', (event) => {
       event.preventDefault();
       if (!socket.connected) return;
-      activeUser = document.getElementById('name').value.trim() || 'Unbekannt';
+      const firstName = document.getElementById('first-name').value.trim();
+      const lastName = document.getElementById('last-name').value.trim();
+      activeUser = `${firstName} ${lastName}`;
       socket.emit('joinRoom', {
         room: document.getElementById('room').value,
         user: activeUser,
+        email: document.getElementById('email').value.trim(),
       });
     });
 
@@ -189,9 +275,12 @@
       const message = messageInput.value.trim();
       if (!message || !socket.connected || !activeRoom) return;
 
+      pendingMessageText = message;
+      messageInput.disabled = true;
+      sendButton.disabled = true;
+      status.textContent = 'Speichere Nachricht ...';
+      status.classList.remove('error');
       socket.emit('sendMessage', { user: activeUser, message });
-      messageInput.value = '';
-      messageInput.focus();
     });
   </script>
 </body>

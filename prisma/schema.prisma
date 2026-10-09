@@ -1,0 +1,85 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+
+model User {
+    
+  id        Int      @id @default(autoincrement())
+  email     String   @unique
+  username  String   @unique
+  firstName String 
+  LastName  String
+  status    String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  message   Message[]
+  chatRoomMembers ChatRoomMember[]
+
+}
+
+
+model ChatRoom {
+
+ id        Int      @id @default(autoincrement())
+  name      String?  @unique
+  isGroup   Boolean  @default(false)
+  image     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  members  ChatRoomMember[]
+  messages Message[]
+
+    
+}
+
+model ChatRoomMember {
+
+  id         Int      @id @default(autoincrement())
+  userId     Int
+  chatRoomId Int
+  joinedAt   DateTime @default(now())
+  role       String   @default("MEMBER")
+
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  chatRoom ChatRoom @relation(fields: [chatRoomId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, chatRoomId])
+  @@index([chatRoomId])
+
+}
+
+
+model Message {
+
+  id         Int      @id @default(autoincrement())
+  content    String
+  type       MessageType @default(TEXT)
+  senderId   Int
+  chatRoomId Int
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  editedAt   DateTime?
+
+  sender   User     @relation(fields: [senderId], references: [id], onDelete: Cascade)
+  chatRoom ChatRoom @relation(fields: [chatRoomId], references: [id], onDelete: Cascade)
+
+  @@index([chatRoomId, createdAt])
+  @@index([senderId])
+
+}
+
+enum MessageType {
+
+   TEXT
+  IMAGE
+  VIDEO
+  AUDIO
+  FILE
+
+}

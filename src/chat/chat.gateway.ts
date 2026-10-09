@@ -1,7 +1,15 @@
-import { randomUUID } from 'node:crypto';
-import { ConnectedSocket, MessageBody, OnGatewayConnection, OnGatewayDisconnect, SubscribeMessage, WebSocketGateway, WebSocketServer } from '@nestjs/websockets';
+import {
+  ConnectedSocket,
+  MessageBody,
+  OnGatewayConnection,
+  OnGatewayDisconnect,
+  SubscribeMessage,
+  WebSocketGateway,
+  WebSocketServer,
+} from '@nestjs/websockets';
 import { Server } from 'socket.io';
 import { Socket } from 'socket.io';
+import { ChatService } from './chat.service.js';
 
 @WebSocketGateway({
   cors: {
@@ -9,6 +17,8 @@ import { Socket } from 'socket.io';
   },
 })
 export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
+  constructor(private readonly chatService: ChatService) {}
+
   @WebSocketServer()
   server: Server;
 
@@ -21,9 +31,12 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
   }
 
   @SubscribeMessage('joinRoom')
-  async handleJoinRoom(@MessageBody() requestedRoom: unknown, @ConnectedSocket() client: Socket) {
+  async handleJoinRoom(
+    @MessageBody() requestedRoom: unknown,
+    @ConnectedSocket() client: Socket,
+  ) {
     const payload = typeof requestedRoom === 'object' && requestedRoom !== null
-      ? requestedRoom as { room?: unknown; user?: unknown }
+      ? requestedRoom as { room?: unknown; user?: unknown; email?: unknown }
       : undefined;
     const roomValue = typeof requestedRoom === 'string' ? requestedRoom : payload?.room;
     if (typeof roomValue !== 'string') {
@@ -58,32 +71,82 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
       return;
     }
 
+    try {
+      const email = typeof payload?.email === 'string' ? payload.email.trim() : undefined;
+      if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        client.emit('roomError', 'Bitte gib eine gültige E-Mail-Adresse ein.');
+        return;
+      }
+      const storedUser = await this.chatService.getOrCreateMockUser(user, email);
+      const storedRoom = await this.chatService.getOrCreateChatRoom(room);
+      client.data.userId = storedUser.id;
+      client.data.chatRoomId = storedRoom.id;
+    } catch {
+      client.emit('roomError', 'User oder Chatraum konnten nicht in der Datenbank gespeichert werden.');
+      return;
+    }
+
     if (previousRoom !== room) {
       if (previousRoom) await client.leave(previousRoom);
       await client.join(room);
     }
     client.data.room = room;
     client.data.user = user;
-    client.emit('roomJoined', { room });
+    client.emit('roomJoined', { room, userId: client.data.userId });
+
+    try {
+      const messages = await this.chatService.getRecentMessages(client.data.chatRoomId);
+      client.emit('messageHistory', messages.map((message) => ({
+        messageId: String(message.id),
+        userId: message.senderId,
+        user: message.sender.LastName === 'Mock'
+          ? message.sender.firstName
+          : `${message.sender.firstName} ${message.sender.LastName}`,
+        message: message.content,
+        createdAt: message.createdAt.toISOString(),
+      })));
+    } catch {
+      client.emit('messageHistoryError', 'Der gespeicherte Verlauf konnte nicht geladen werden.');
+    }
   }
 
   @SubscribeMessage('sendMessage')
-  handleMessage(
+  async handleMessage(
     @MessageBody() payload: { user?: string; message?: string },
     @ConnectedSocket() client: Socket,
   ) {
     const room = client.data.room as string | undefined;
-    const user = payload?.user;
+    const userId = client.data.userId;
+    const chatRoomId = client.data.chatRoomId;
     const message = payload?.message;
 
-    if (!room || typeof message !== 'string' || !message.trim()) return;
+    if (
+      !room ||
+      !Number.isInteger(userId) ||
+      !Number.isInteger(chatRoomId) ||
+      typeof message !== 'string' ||
+      !message.trim()
+    ) return;
 
-    const sender = typeof user === 'string' && user.trim() ? user.trim() : client.id;
+    let storedMessage;
+    try {
+      storedMessage = await this.chatService.saveMessage(
+        userId,
+        chatRoomId,
+        message.trim(),
+      );
+    } catch {
+      client.emit('messageError', 'Die Nachricht konnte nicht in der Datenbank gespeichert werden.');
+      return;
+    }
+
     this.server.to(room).emit('receivedMessage', {
-      messageId: randomUUID(),
+      messageId: String(storedMessage.id),
       senderId: client.id,
-      user: sender,
+      userId,
+      user: client.data.user || client.id,
       message: message.trim(),
+      createdAt: storedMessage.createdAt.toISOString(),
     });
   }
 
