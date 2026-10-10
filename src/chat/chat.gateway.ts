@@ -28,6 +28,34 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
   handleDisconnect(client: Socket) {
     console.log(`Client disconnected: ${client.id}`);
+    const activeCall = client.data.activeCall;
+    if (activeCall) {
+      const peer = this.server.sockets.sockets.get(activeCall.peerSocketId);
+      if (peer && peer.data.activeCall?.callId === activeCall.callId) {
+        delete peer.data.activeCall;
+        peer.emit('call:ended', { callId: activeCall.callId, reason: 'peer-disconnected' });
+      }
+    }
+
+    const pendingCall = client.data.pendingCall;
+    if (pendingCall) {
+      const peer = this.server.sockets.sockets.get(pendingCall.peerSocketId);
+      delete client.data.pendingCall;
+      if (peer && peer.data.incomingCall?.callId === pendingCall.callId) {
+        delete peer.data.incomingCall;
+        peer.emit('call:ended', { callId: pendingCall.callId, reason: 'peer-disconnected' });
+      }
+    }
+
+    const incomingCall = client.data.incomingCall;
+    if (incomingCall) {
+      const caller = this.server.sockets.sockets.get(incomingCall.callerSocketId);
+      delete client.data.incomingCall;
+      if (caller && caller.data.pendingCall?.callId === incomingCall.callId) {
+        delete caller.data.pendingCall;
+        caller.emit('call:ended', { callId: incomingCall.callId, reason: 'peer-disconnected' });
+      }
+    }
   }
 
   @SubscribeMessage('joinRoom')
@@ -164,5 +192,183 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
       messageId,
       readerId: client.id,
     });
+  }
+
+
+  @SubscribeMessage('call:invite')
+  handleCallInvite(
+    @MessageBody() payload: { kind?: unknown } | undefined,
+    @ConnectedSocket() client: Socket,
+  ) {
+    const room = client.data.room as string | undefined;
+    if (!room) {
+      client.emit('call:error', 'Betritt zuerst einen Chatraum.');
+      return;
+    }
+
+    const kind = payload?.kind;
+    if (kind !== 'audio' && kind !== 'video') {
+      client.emit('call:error', 'Ungültiger Anruftyp.');
+      return;
+    }
+
+    const roomMembers = this.server.sockets.adapter.rooms.get(room) ?? new Set();
+    const otherSockets = [...roomMembers]
+      .filter((socketId) => socketId !== client.id)
+      .map((socketId) => this.server.sockets.sockets.get(socketId))
+      .filter(
+        (peer): peer is Socket =>
+          peer !== undefined && peer.data.userId !== client.data.userId,
+      );
+
+    const otherUserIds = new Set(otherSockets.map((peer) => peer.data.userId));
+
+    if (otherUserIds.size !== 1) {
+      client.emit('call:error', 'Es ist kein anderer Benutzer im Raum.');
+      return;
+    }
+
+    if (client.data.activeCall || client.data.pendingCall) {
+      client.emit('call:error', 'Du bist bereits in einem Anruf oder hast eine offene Einladung.');
+      return;
+    }
+
+    const peer = otherSockets[0];
+    if (peer.data.activeCall || peer.data.incomingCall || peer.data.pendingCall) {
+      client.emit('call:error', 'Der andere Benutzer ist bereits in einem Anruf oder hat eine offene Einladung.');
+      return;
+    }
+
+    const callId = client.id;
+    client.data.pendingCall = {
+      callId,
+      peerSocketId: peer.id,
+      kind,
+    };
+    peer.data.incomingCall = {
+      callId,
+      callerSocketId: client.id,
+      callerUserId: client.data.userId,
+      kind,
+    };
+    peer.emit('call:incoming', {
+      callId,
+      fromUserId: client.data.userId,
+      fromName: client.data.user,
+      kind,
+    });
+  }
+
+  @SubscribeMessage('call:respond')
+  handleCallResponse(
+    @MessageBody() payload: { accepted?: unknown } | undefined,
+    @ConnectedSocket() client: Socket,
+  ) {
+    const room = client.data.room as string | undefined;
+    const incomingCall = client.data.incomingCall;
+
+    if (
+      !room ||
+      !incomingCall ||
+      typeof payload?.accepted !== 'boolean'
+    ) {
+      client.emit('call:error', 'Keine gültige Anrufeinladung gefunden.');
+      return;
+    }
+
+    const roomMembers = this.server.sockets.adapter.rooms.get(room) ?? new Set();
+    if (!roomMembers.has(incomingCall.callerSocketId)) {
+      delete client.data.incomingCall;
+      client.emit('call:error', 'Der Anrufer ist nicht mehr verbunden.');
+      return;
+    }
+
+    const caller = this.server.sockets.sockets.get(incomingCall.callerSocketId);
+    if (
+      !caller ||
+      caller.data.room !== room ||
+      caller.data.userId !== incomingCall.callerUserId ||
+      caller.data.pendingCall?.callId !== incomingCall.callId
+    ) {
+      delete client.data.incomingCall;
+      client.emit('call:error', 'Der Anrufer ist nicht mehr erreichbar.');
+      return;
+    }
+
+    if (payload.accepted && (caller.data.activeCall || client.data.activeCall)) {
+      client.emit('call:error', 'Ein Teilnehmer ist bereits in einem Anruf.');
+      return;
+    }
+
+    if (payload.accepted) {
+      caller.data.activeCall = {
+        callId: incomingCall.callId,
+        peerSocketId: client.id,
+        kind: incomingCall.kind,
+      };
+      client.data.activeCall = {
+        callId: incomingCall.callId,
+        peerSocketId: caller.id,
+        kind: incomingCall.kind,
+      };
+    }
+    delete caller.data.pendingCall;
+
+    caller.emit('call:response', {
+      accepted: payload.accepted,
+      callId: incomingCall.callId,
+      kind: incomingCall.kind,
+    });
+
+    delete client.data.incomingCall;
+  }
+
+  @SubscribeMessage('call:signal')
+  handleCallSignal(
+    @MessageBody() payload: { callId?: unknown; signal?: unknown } | undefined,
+    @ConnectedSocket() client: Socket,
+  ) {
+    const room = client.data.room as string | undefined;
+    const activeCall = client.data.activeCall;
+    if (
+      !room ||
+      !activeCall ||
+      !payload ||
+      payload?.callId !== activeCall.callId ||
+      typeof payload.signal !== 'object' ||
+      payload.signal === null
+    ) return;
+
+    const peer = this.server.sockets.sockets.get(activeCall.peerSocketId);
+    if (
+      !peer ||
+      peer.data.room !== room ||
+      peer.data.activeCall?.callId !== activeCall.callId
+    ) {
+      delete client.data.activeCall;
+      client.emit('call:ended', { callId: activeCall.callId, reason: 'peer-disconnected' });
+      return;
+    }
+
+    peer.emit('call:signal', {
+      callId: activeCall.callId,
+      signal: payload.signal,
+    });
+  }
+
+  @SubscribeMessage('call:end')
+  handleCallEnd(
+    @MessageBody() payload: { callId?: unknown } | undefined,
+    @ConnectedSocket() client: Socket,
+  ) {
+    const activeCall = client.data.activeCall;
+    if (!activeCall || payload?.callId !== activeCall.callId) return;
+
+    const peer = this.server.sockets.sockets.get(activeCall.peerSocketId);
+    delete client.data.activeCall;
+    if (peer && peer.data.activeCall?.callId === activeCall.callId) {
+      delete peer.data.activeCall;
+      peer.emit('call:ended', { callId: activeCall.callId, reason: 'hangup' });
+    }
   }
 }

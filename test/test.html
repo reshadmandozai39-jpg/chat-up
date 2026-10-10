@@ -14,6 +14,12 @@
     body { margin: 0; }
     .chat { width: min(100%, 640px); height: 100dvh; min-height: 420px; margin: 0 auto; display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto; background: #efeae2; box-shadow: 0 0 24px #14282022; }
     header { display: flex; align-items: center; gap: 0.8rem; padding: 0.7rem 1rem; color: #fff; background: #075e54; }
+    .call-controls { display: flex; align-items: center; gap: 0.4rem; }
+    #incoming-call-actions[hidden] { display: none; }
+    .call-media { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.5rem; margin-bottom: 1rem; }
+    #call-media[hidden] { display: none; }
+    .call-media video { width: 100%; max-height: 220px; aspect-ratio: 16 / 9; border-radius: 5px; background: #16221f; object-fit: cover; }
+    .call-media audio { position: absolute; width: 1px; height: 1px; opacity: 0; }
     .avatar { display: grid; width: 3rem; aspect-ratio: 1; place-items: center; flex: 0 0 auto; border-radius: 50%; background: #d7e8d9; color: #075e54; font-size: 1.2rem; font-weight: 700; }
     .heading { min-width: 0; }
     h1 { overflow: hidden; margin: 0; font-size: 1.1rem; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
@@ -61,6 +67,15 @@
         <h1 id="chat-title">Dein Chat</h1>
         <p id="status" role="status">Verbinde mit dem Chat-Server ...</p>
       </div>
+      <div class="call-controls">
+        <button id="audio-call" type="button" disabled> Audioanruf</button>
+        <button id="video-call" type="button" disabled> Videoanruf</button>
+      </div>
+      <div id="incoming-call-actions" class="call-controls" hidden>
+        <span id="incoming-call-label"></span>
+        <button id="accept-call" type="button">Annehmen</button>
+        <button id="reject-call" type="button">Ablehnen</button>
+      </div>
     </header>
     <form id="room-form">
       <div class="profile-fields">
@@ -84,6 +99,12 @@
     <section class="conversation" aria-label="Nachrichten">
       <div class="today">Heute</div>
       <p class="room-note">Teile den Raumnamen nur mit der Person, die du einladen möchtest.</p>
+      <div id="call-media" class="call-media" hidden>
+        <video id="remote-video" autoplay playsinline hidden></video>
+        <video id="local-video" autoplay muted playsinline hidden></video>
+        <audio id="remote-audio" autoplay></audio>
+        <button id="end-call" type="button">Auflegen</button>
+      </div>
       <ul id="messages" aria-live="polite"></ul>
     </section>
     <form id="chat-form">
@@ -108,6 +129,12 @@
     let historyLoaded = false;
     let pendingMessages = [];
     let pendingMessageText = '';
+    let incomingCallKind = null;
+    let currentCallId = null;
+    let currentCallKind = null;
+    let peerConnection = null;
+    let localMediaStream = null;
+    const pendingIceCandidates = [];
 
     function markIncomingMessagesAsRead() {
       if (document.visibilityState !== 'visible') return;
@@ -135,11 +162,16 @@
       status.classList.add('error');
       messageInput.disabled = true;
       sendButton.disabled = true;
+      audioCallButton.disabled = true;
+      videoCallButton.disabled = true;
+      finishCall('Verbindung getrennt');
     });
 
     socket.on('roomJoined', ({ room, userId }) => {
       activeRoom = room;
       activeUserId = userId;
+      audioCallButton.disabled = false;
+      videoCallButton.disabled = false;
       activePeer = '';
       historyLoaded = false;
       pendingMessages = [];
@@ -178,6 +210,10 @@
         .format(new Date(data.createdAt || Date.now()));
       const meta = document.createElement('span');
       meta.className = 'message-meta';
+
+
+
+
       meta.appendChild(time);
       if (own) {
         const receipt = document.createElement('span');
@@ -193,6 +229,202 @@
       messages.parentElement.scrollTop = messages.parentElement.scrollHeight;
       if (!own) markIncomingMessagesAsRead();
     }
+
+
+    const audioCallButton = document.getElementById('audio-call');
+    const videoCallButton = document.getElementById('video-call');
+    const incomingCallActions = document.getElementById('incoming-call-actions');
+    const incomingCallLabel = document.getElementById('incoming-call-label');
+    const acceptCallButton = document.getElementById('accept-call');
+    const rejectCallButton = document.getElementById('reject-call');
+    const callMedia = document.getElementById('call-media');
+    const localVideo = document.getElementById('local-video');
+    const remoteVideo = document.getElementById('remote-video');
+    const remoteAudio = document.getElementById('remote-audio');
+    const endCallButton = document.getElementById('end-call');
+
+    function finishCall(message) {
+      if (peerConnection) {
+        peerConnection.onicecandidate = null;
+        peerConnection.ontrack = null;
+        peerConnection.close();
+      }
+      peerConnection = null;
+      localMediaStream?.getTracks().forEach((track) => track.stop());
+      localMediaStream = null;
+      localVideo.srcObject = null;
+      remoteVideo.srcObject = null;
+      remoteAudio.srcObject = null;
+      localVideo.hidden = true;
+      remoteVideo.hidden = true;
+      callMedia.hidden = true;
+      incomingCallActions.hidden = true;
+      incomingCallKind = null;
+      currentCallId = null;
+      currentCallKind = null;
+      pendingIceCandidates.length = 0;
+      if (message) status.textContent = message;
+    }
+
+    async function prepareCallMedia(kind) {
+      localMediaStream = await navigator.mediaDevices.getUserMedia({
+        audio: true,
+        video: kind === 'video',
+      });
+      callMedia.hidden = false;
+      localVideo.hidden = kind !== 'video';
+      remoteVideo.hidden = kind !== 'video';
+      if (kind === 'video') localVideo.srcObject = localMediaStream;
+
+      peerConnection = new RTCPeerConnection({
+        iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
+      });
+      localMediaStream.getTracks().forEach((track) => {
+        peerConnection.addTrack(track, localMediaStream);
+      });
+      peerConnection.onicecandidate = ({ candidate }) => {
+        if (candidate && currentCallId) {
+          socket.emit('call:signal', {
+            callId: currentCallId,
+            signal: { type: 'ice-candidate', candidate },
+          });
+        }
+      };
+      peerConnection.ontrack = ({ streams }) => {
+        const [remoteStream] = streams;
+        remoteVideo.srcObject = remoteStream;
+        remoteAudio.srcObject = remoteStream;
+        remoteAudio.play().catch(() => {});
+      };
+      peerConnection.onconnectionstatechange = () => {
+        if (peerConnection?.connectionState === 'connected') {
+          status.textContent = currentCallKind === 'video' ? 'Videoanruf aktiv' : 'Audioanruf aktiv';
+        } else if (peerConnection?.connectionState === 'failed') {
+          status.textContent = 'Verbindung fehlgeschlagen. Ein TURN-Server kann erforderlich sein.';
+        }
+      };
+    }
+
+    async function flushPendingIceCandidates() {
+      while (pendingIceCandidates.length && peerConnection?.remoteDescription) {
+        await peerConnection.addIceCandidate(pendingIceCandidates.shift());
+      }
+    }
+
+    async function inviteCall(kind) {
+      if (!socket.connected || !activeRoom) return;
+      currentCallId = socket.id;
+      currentCallKind = kind;
+      status.textContent = `${kind === 'video' ? 'Video' : 'Audio'}anruf wird gestartet ...`;
+      socket.emit('call:invite', { kind });
+    }
+
+    audioCallButton.addEventListener('click', () => {
+      inviteCall('audio');
+    });
+
+    videoCallButton.addEventListener('click', () => {
+      inviteCall('video');
+    });
+
+    socket.on('call:incoming', ({ callId, fromName, kind }) => {
+      currentCallId = callId;
+      currentCallKind = kind;
+      incomingCallKind = kind;
+      const callType = kind === 'video' ? 'Videoanruf' : 'Audioanruf';
+      incomingCallLabel.textContent = `${fromName} ruft an (${callType})`;
+      incomingCallActions.hidden = false;
+      status.textContent = 'Eingehender Anruf';
+    });
+
+    acceptCallButton.addEventListener('click', async () => {
+      if (!incomingCallKind) return;
+      try {
+        await prepareCallMedia(incomingCallKind);
+        socket.emit('call:respond', { accepted: true });
+        status.textContent = 'Anruf angenommen. Verbinde ...';
+        incomingCallActions.hidden = true;
+        incomingCallKind = null;
+      } catch {
+        socket.emit('call:respond', { accepted: false });
+        finishCall('Mikrofon oder Kamera konnte nicht gestartet werden. Bitte Berechtigung prüfen.');
+      }
+    });
+
+    rejectCallButton.addEventListener('click', () => {
+      if (!incomingCallKind) return;
+      socket.emit('call:respond', { accepted: false });
+      finishCall('Anruf abgelehnt.');
+    });
+
+    socket.on('call:response', async ({ accepted, callId, kind }) => {
+      const callType = kind === 'video' ? 'Videoanruf' : 'Audioanruf';
+      if (!accepted) {
+        finishCall(`${callType} abgelehnt.`);
+        return;
+      }
+
+      currentCallId = callId;
+      currentCallKind = kind;
+      try {
+        await prepareCallMedia(kind);
+        const offer = await peerConnection.createOffer();
+        await peerConnection.setLocalDescription(offer);
+        socket.emit('call:signal', {
+          callId,
+          signal: { type: 'offer', description: peerConnection.localDescription },
+        });
+        status.textContent = 'Anruf angenommen. Verbinde ...';
+      } catch {
+        socket.emit('call:end', { callId });
+        finishCall('Mikrofon oder Kamera konnte nicht gestartet werden. Bitte Berechtigung prüfen.');
+      }
+    });
+
+    socket.on('call:signal', async ({ callId, signal }) => {
+      if (callId !== currentCallId || !peerConnection || !signal) return;
+      try {
+        if (signal.type === 'offer') {
+          await peerConnection.setRemoteDescription(signal.description);
+          await flushPendingIceCandidates();
+          const answer = await peerConnection.createAnswer();
+          await peerConnection.setLocalDescription(answer);
+          socket.emit('call:signal', {
+            callId,
+            signal: { type: 'answer', description: peerConnection.localDescription },
+          });
+        } else if (signal.type === 'answer') {
+          await peerConnection.setRemoteDescription(signal.description);
+          await flushPendingIceCandidates();
+        } else if (signal.type === 'ice-candidate') {
+          if (peerConnection.remoteDescription) {
+            await peerConnection.addIceCandidate(signal.candidate);
+          } else {
+            pendingIceCandidates.push(signal.candidate);
+          }
+        }
+      } catch {
+        socket.emit('call:end', { callId });
+        finishCall('Die Medienverbindung konnte nicht aufgebaut werden.');
+      }
+    });
+
+    endCallButton.addEventListener('click', () => {
+      if (currentCallId) socket.emit('call:end', { callId: currentCallId });
+      finishCall('Anruf beendet.');
+    });
+
+    socket.on('call:ended', ({ reason }) => {
+      finishCall(reason === 'peer-disconnected'
+        ? 'Die andere Person hat die Verbindung getrennt.'
+        : 'Anruf beendet.');
+    });
+
+    socket.on('call:error', (message) => {
+      status.textContent = message;
+      status.classList.add('error');
+      if (currentCallId && !peerConnection) finishCall(message);
+    });
 
     socket.on('messageHistory', (history) => {
       history.forEach(renderMessage);
