@@ -73,7 +73,7 @@ describe('ChatService', () => {
     await service.saveMessage(7, 8, 'Hallo zusammen');
 
     expect(messageCreate).toHaveBeenCalledWith({
-      data: { senderId: 7, chatRoomId: 8, content: 'Hallo zusammen' },
+      data: { senderId: 7, chatRoomId: 8, content: 'Hallo zusammen', type: 'TEXT' },
     });
   });
 

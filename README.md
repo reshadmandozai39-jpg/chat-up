@@ -57,6 +57,14 @@ $ npm run test:e2e
 $ npm run test:cov
 ```
 
+## Voice calls
+
+For local testing, open `/test.html` from the Nest server or serve the `test` directory on port `5501`. Join the same room from two different users before starting an audio call. When the page is served on port `5501`, it connects to port `3000` on the same host. For another server address, pass it as a URL parameter, for example `?server=http%3A%2F%2F192.168.1.10%3A3000`.
+
+The server always provides a public STUN server. To add TURN relay support, set `TURN_URLS` to comma-separated TURN URLs and set `TURN_USERNAME` and `TURN_CREDENTIAL` before starting the server. TURN credentials are sent to connected browsers, so use short-lived credentials in production rather than permanent provider secrets. Calls between devices also require a reachable backend address and HTTPS outside localhost.
+
+The chat also supports recorded voice notes up to 60 seconds. Audio files are stored under `uploads/audio` and served from `/uploads/`; set `UPLOADS_DIR` to a persistent volume path when deploying. Video remains available as a live video call.
+
 ## Deployment
 
 When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.

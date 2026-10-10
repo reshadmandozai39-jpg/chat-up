@@ -9,9 +9,13 @@ import {
 } from '@nestjs/websockets';
 import { Server } from 'socket.io';
 import { Socket } from 'socket.io';
+import { randomUUID } from 'node:crypto';
+import { mkdir, unlink, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { ChatService } from './chat.service.js';
 
 @WebSocketGateway({
+  maxHttpBufferSize: 8 * 1024 * 1024,
   cors: {
     origin: '*',
   },
@@ -24,6 +28,25 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
   handleConnection(client: Socket) {
     console.log(`Client connected: ${client.id}`);
+    const iceServers: RTCIceServer[] = [
+      { urls: 'stun:stun.l.google.com:19302' },
+    ];
+    const turnUrls = process.env.TURN_URLS
+      ?.split(',')
+      .map((url) => url.trim())
+      .filter(Boolean);
+    const turnUsername = process.env.TURN_USERNAME;
+    const turnCredential = process.env.TURN_CREDENTIAL;
+
+    if (turnUrls?.length && turnUsername && turnCredential) {
+      iceServers.push({
+        urls: turnUrls,
+        username: turnUsername,
+        credential: turnCredential,
+      });
+    }
+
+    client.emit('call:config', { iceServers });
   }
 
   handleDisconnect(client: Socket) {
@@ -131,6 +154,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
           ? message.sender.firstName
           : `${message.sender.firstName} ${message.sender.LastName}`,
         message: message.content,
+        type: message.type,
         createdAt: message.createdAt.toISOString(),
       })));
     } catch {
@@ -174,6 +198,81 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
       userId,
       user: client.data.user || client.id,
       message: message.trim(),
+      type: 'TEXT',
+      createdAt: storedMessage.createdAt.toISOString(),
+    });
+  }
+
+  @SubscribeMessage('sendAudioMessage')
+  async handleAudioMessage(
+    @MessageBody() payload: { mimeType?: unknown; data?: unknown } | undefined,
+    @ConnectedSocket() client: Socket,
+  ) {
+    const room = client.data.room as string | undefined;
+    const userId = client.data.userId;
+    const chatRoomId = client.data.chatRoomId;
+    const mimeType = typeof payload?.mimeType === 'string'
+      ? payload.mimeType.split(';')[0].trim().toLowerCase()
+      : '';
+    const extensions: Record<string, string> = {
+      'audio/webm': 'webm',
+      'audio/ogg': 'ogg',
+      'audio/mp4': 'm4a',
+      'audio/wav': 'wav',
+      'audio/wave': 'wav',
+    };
+    const audio = payload?.data;
+
+    if (
+      !room ||
+      !Number.isInteger(userId) ||
+      !Number.isInteger(chatRoomId) ||
+      (!Buffer.isBuffer(audio) && !(audio instanceof Uint8Array)) ||
+      !extensions[mimeType]
+    ) {
+      client.emit('messageError', 'Die Sprachnachricht hat ein ungültiges Format.');
+      return;
+    }
+
+    const audioBuffer = Buffer.from(audio);
+    if (audioBuffer.length === 0 || audioBuffer.length > 8 * 1024 * 1024) {
+      client.emit('messageError', 'Die Sprachnachricht ist leer oder größer als 8 MB.');
+      return;
+    }
+
+    const filename = `${randomUUID()}.${extensions[mimeType]}`;
+    const uploadDirectory = join(process.env.UPLOADS_DIR || join(process.cwd(), 'uploads'), 'audio');
+    const audioPath = `/uploads/audio/${filename}`;
+
+    try {
+      await mkdir(uploadDirectory, { recursive: true });
+      await writeFile(join(uploadDirectory, filename), audioBuffer, { flag: 'wx' });
+    } catch {
+      client.emit('messageError', 'Die Sprachnachricht konnte nicht gespeichert werden.');
+      return;
+    }
+
+    let storedMessage;
+    try {
+      storedMessage = await this.chatService.saveMessage(
+        userId,
+        chatRoomId,
+        audioPath,
+        'AUDIO',
+      );
+    } catch {
+      await unlink(join(uploadDirectory, filename)).catch(() => undefined);
+      client.emit('messageError', 'Die Sprachnachricht konnte nicht in der Datenbank gespeichert werden.');
+      return;
+    }
+
+    this.server.to(room).emit('receivedMessage', {
+      messageId: String(storedMessage.id),
+      senderId: client.id,
+      userId,
+      user: client.data.user || client.id,
+      message: audioPath,
+      type: 'AUDIO',
       createdAt: storedMessage.createdAt.toISOString(),
     });
   }

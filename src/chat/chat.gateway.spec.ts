@@ -1,4 +1,7 @@
 import { Test, TestingModule } from '@nestjs/testing';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { Server, Socket } from 'socket.io';
 import { ChatGateway } from './chat.gateway.js';
 import { ChatService } from './chat.service.js';
@@ -41,6 +44,38 @@ describe('ChatGateway', () => {
     expect(gateway).toBeDefined();
   });
 
+  it('sends configured TURN servers to a connected client', () => {
+    const previousTurnUrls = process.env.TURN_URLS;
+    const previousTurnUsername = process.env.TURN_USERNAME;
+    const previousTurnCredential = process.env.TURN_CREDENTIAL;
+    process.env.TURN_URLS = 'turn:turn.example.test:3478, turns:turn.example.test:5349';
+    process.env.TURN_USERNAME = 'temporary-user';
+    process.env.TURN_CREDENTIAL = 'temporary-credential';
+    const emit = vi.fn();
+
+    try {
+      gateway.handleConnection({ id: 'client-1', emit } as unknown as Socket);
+
+      expect(emit).toHaveBeenCalledWith('call:config', {
+        iceServers: [
+          { urls: 'stun:stun.l.google.com:19302' },
+          {
+            urls: ['turn:turn.example.test:3478', 'turns:turn.example.test:5349'],
+            username: 'temporary-user',
+            credential: 'temporary-credential',
+          },
+        ],
+      });
+    } finally {
+      if (previousTurnUrls === undefined) delete process.env.TURN_URLS;
+      else process.env.TURN_URLS = previousTurnUrls;
+      if (previousTurnUsername === undefined) delete process.env.TURN_USERNAME;
+      else process.env.TURN_USERNAME = previousTurnUsername;
+      if (previousTurnCredential === undefined) delete process.env.TURN_CREDENTIAL;
+      else process.env.TURN_CREDENTIAL = previousTurnCredential;
+    }
+  });
+
   it('saves and sends the message only to the sender room', async () => {
     const emit = vi.fn();
     const to = vi.fn(() => ({ emit }));
@@ -80,6 +115,45 @@ describe('ChatGateway', () => {
 
     expect(emit).not.toHaveBeenCalled();
     expect(saveMessage).not.toHaveBeenCalled();
+  });
+
+  it('stores an audio message and broadcasts its playable path', async () => {
+    const previousUploadsDir = process.env.UPLOADS_DIR;
+    const uploadsDir = await mkdtemp(join(tmpdir(), 'chat-up-audio-'));
+    process.env.UPLOADS_DIR = uploadsDir;
+    const emit = vi.fn();
+    const to = vi.fn(() => ({ emit }));
+    gateway.server = { to } as unknown as Server;
+    const audio = Buffer.from('wav voice data');
+
+    try {
+      await gateway.handleAudioMessage(
+        { mimeType: 'audio/wav', data: audio },
+        {
+          id: 'client-1',
+          data: { room: 'raum-1', user: 'Anna', userId: 7, chatRoomId: 8 },
+        } as Socket,
+      );
+
+      expect(saveMessage).toHaveBeenCalledWith(
+        7,
+        8,
+        expect.stringMatching(/^\/uploads\/audio\/[\w-]+\.wav$/),
+        'AUDIO',
+      );
+      const audioPath = saveMessage.mock.calls[0][2] as string;
+      expect(await readFile(join(uploadsDir, 'audio', audioPath.split('/').at(-1)!))).toEqual(audio);
+      expect(to).toHaveBeenCalledWith('raum-1');
+      expect(emit).toHaveBeenCalledWith('receivedMessage', expect.objectContaining({
+        message: audioPath,
+        type: 'AUDIO',
+        user: 'Anna',
+      }));
+    } finally {
+      if (previousUploadsDir === undefined) delete process.env.UPLOADS_DIR;
+      else process.env.UPLOADS_DIR = previousUploadsDir;
+      await rm(uploadsDir, { recursive: true, force: true });
+    }
   });
 
   it('does not send messages before the client joins a room', async () => {
@@ -211,7 +285,25 @@ describe('ChatGateway', () => {
 
   it('routes a call response to the inviter and clears the pending invitation', () => {
     const callerEmit = vi.fn();
-    const caller = {
+    type CallKind = 'audio' | 'video';
+    type CallState = { callId: string; peerSocketId: string; kind: CallKind };
+    type CallTestSocket = {
+      id: string;
+      data: {
+        userId?: number;
+        room?: string;
+        pendingCall?: CallState;
+        incomingCall?: {
+          callId: string;
+          callerSocketId: string;
+          callerUserId: number;
+          kind: CallKind;
+        };
+        activeCall?: CallState;
+      };
+      emit: ReturnType<typeof vi.fn>;
+    };
+    const caller: CallTestSocket = {
       id: 'caller',
       data: {
         userId: 7,
@@ -220,7 +312,7 @@ describe('ChatGateway', () => {
       },
       emit: callerEmit,
     };
-    const callee = {
+    const callee: CallTestSocket = {
       id: 'callee',
       data: {
         room: 'raum-1',
@@ -235,7 +327,7 @@ describe('ChatGateway', () => {
       emit: vi.fn(),
     };
     const rooms = new Map([['raum-1', new Set(['caller', 'callee'])]]);
-    const sockets = new Map([
+    const sockets = new Map<string, CallTestSocket>([
       ['caller', caller],
       ['callee', callee],
     ]);

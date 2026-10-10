@@ -41,9 +41,14 @@ export class ChatService {
 		});
 	}
 
-	async saveMessage(senderId: number, chatRoomId: number, content: string) {
+	async saveMessage(
+		senderId: number,
+		chatRoomId: number,
+		content: string,
+		type: 'TEXT' | 'AUDIO' = 'TEXT',
+	) {
 		return this.prisma.message.create({
-			data: { senderId, chatRoomId, content },
+			data: { senderId, chatRoomId, content, type },
 		});
 	}
 

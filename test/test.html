@@ -47,9 +47,12 @@
     #messages .message-meta { display: flex; justify-content: flex-end; align-items: center; gap: 0.3rem; margin-top: 0.1rem; color: #76817a; font-size: 0.7rem; }
     #messages .receipt { color: #168c52; font-size: 0.9rem; font-weight: 700; }
     #messages .receipt.seen { color: #168c52; }
+    #messages audio { display: block; width: min(100%, 300px); height: 2.7rem; }
     #chat-form { display: flex; gap: 0.55rem; padding: 0.65rem; background: #f5f6f3; }
     #msg { flex: 1; border-radius: 20px; padding-inline: 1rem; }
     #chat-form button { min-width: 5.2rem; border-radius: 20px; }
+    #voice-message { min-width: 3rem; padding-inline: 0.8rem; }
+    #voice-message.recording { border-color: #a82e2e; background: #a82e2e; }
     @media (max-width: 520px) {
       .chat { min-height: 100dvh; }
       .profile-fields { grid-template-columns: 1fr 1fr; }
@@ -108,6 +111,7 @@
       <ul id="messages" aria-live="polite"></ul>
     </section>
     <form id="chat-form">
+      <button id="voice-message" type="button" disabled aria-label="Sprachnachricht aufnehmen" aria-pressed="false" title="Sprachnachricht aufnehmen">🎙</button>
       <input id="msg" autocomplete="off" placeholder="Nachricht schreiben" aria-label="Nachricht" disabled>
       <button type="submit" disabled>Senden</button>
     </form>
@@ -116,12 +120,22 @@
   <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
 
   <script>
-    const socket = io('http://localhost:3000');
+    const pageUrl = new URL(window.location.href);
+    const serverOverride = new URLSearchParams(pageUrl.search).get('server');
+    const defaultServerUrl = pageUrl.protocol === 'file:'
+      ? 'http://localhost:3000'
+      : pageUrl.port === '5501'
+        ? `${pageUrl.protocol}//${pageUrl.hostname}:3000`
+        : pageUrl.origin;
+    const socket = io(serverOverride || defaultServerUrl);
+    let iceServers = [{ urls: 'stun:stun.l.google.com:19302' }];
     const status = document.getElementById('status');
     const chatTitle = document.getElementById('chat-title');
     const avatar = document.getElementById('avatar');
     const messageInput = document.getElementById('msg');
-    const sendButton = document.querySelector('#chat-form button');
+    const sendButton = document.querySelector('#chat-form button[type="submit"]');
+    const voiceMessageButton = document.getElementById('voice-message');
+    const maxVoiceMessageDuration = 60_000;
     let activeRoom = '';
     let activeUser = '';
     let activeUserId = null;
@@ -134,6 +148,14 @@
     let currentCallKind = null;
     let peerConnection = null;
     let localMediaStream = null;
+    let voiceAudioContext = null;
+    let voiceAudioSource = null;
+    let voiceAudioProcessor = null;
+    let voiceSilenceGain = null;
+    let voiceRecorderStream = null;
+    let voiceRecorderOwnsStream = false;
+    let voiceRecordingTimeout = null;
+    let voiceRecordingSamples = [];
     const pendingIceCandidates = [];
 
     function markIncomingMessagesAsRead() {
@@ -150,6 +172,12 @@
 
     document.addEventListener('visibilitychange', markIncomingMessagesAsRead);
 
+    socket.on('call:config', (config) => {
+      if (Array.isArray(config?.iceServers) && config.iceServers.length) {
+        iceServers = config.iceServers;
+      }
+    });
+
     socket.on('connect', () => {
       status.classList.add('connected');
       if (activeRoom) socket.emit('joinRoom', { room: activeRoom, user: activeUser });
@@ -162,8 +190,10 @@
       status.classList.add('error');
       messageInput.disabled = true;
       sendButton.disabled = true;
+      voiceMessageButton.disabled = true;
       audioCallButton.disabled = true;
       videoCallButton.disabled = true;
+      if (voiceAudioProcessor) stopVoiceRecording(false);
       finishCall('Verbindung getrennt');
     });
 
@@ -172,6 +202,7 @@
       activeUserId = userId;
       audioCallButton.disabled = false;
       videoCallButton.disabled = false;
+      voiceMessageButton.disabled = false;
       activePeer = '';
       historyLoaded = false;
       pendingMessages = [];
@@ -202,8 +233,17 @@
       const sender = document.createElement('span');
       sender.className = 'sender';
       sender.textContent = data.user;
-      const message = document.createElement('span');
-      message.textContent = data.message;
+      let message;
+      if (data.type === 'AUDIO') {
+        message = document.createElement('audio');
+        message.controls = true;
+        message.preload = 'metadata';
+        message.src = data.message;
+        message.setAttribute('aria-label', `Sprachnachricht von ${data.user}`);
+      } else {
+        message = document.createElement('span');
+        message.textContent = data.message;
+      }
       const time = document.createElement('span');
       time.className = 'message-time';
       time.textContent = new Intl.DateTimeFormat('de-DE', { hour: '2-digit', minute: '2-digit' })
@@ -229,6 +269,137 @@
       messages.parentElement.scrollTop = messages.parentElement.scrollHeight;
       if (!own) markIncomingMessagesAsRead();
     }
+
+    function createWavRecording(chunks, sampleRate) {
+      const sampleCount = chunks.reduce((count, chunk) => count + chunk.length, 0);
+      if (!sampleCount) return { blob: new Blob([], { type: 'audio/wav' }), hasSignal: false };
+      const dataSize = sampleCount * 2;
+      const buffer = new ArrayBuffer(44 + dataSize);
+      const view = new DataView(buffer);
+      let peak = 0;
+      const writeText = (offset, text) => {
+        for (let index = 0; index < text.length; index += 1) {
+          view.setUint8(offset + index, text.charCodeAt(index));
+        }
+      };
+
+      writeText(0, 'RIFF');
+      view.setUint32(4, 36 + dataSize, true);
+      writeText(8, 'WAVE');
+      writeText(12, 'fmt ');
+      view.setUint32(16, 16, true);
+      view.setUint16(20, 1, true);
+      view.setUint16(22, 1, true);
+      view.setUint32(24, sampleRate, true);
+      view.setUint32(28, sampleRate * 2, true);
+      view.setUint16(32, 2, true);
+      view.setUint16(34, 16, true);
+      writeText(36, 'data');
+      view.setUint32(40, dataSize, true);
+
+      let offset = 44;
+      for (const chunk of chunks) {
+        for (const sample of chunk) {
+          const clipped = Math.max(-1, Math.min(1, sample));
+          peak = Math.max(peak, Math.abs(clipped));
+          view.setInt16(offset, clipped < 0 ? clipped * 0x8000 : clipped * 0x7fff, true);
+          offset += 2;
+        }
+      }
+
+      return { blob: new Blob([buffer], { type: 'audio/wav' }), hasSignal: peak > 0.001 };
+    }
+
+    async function stopVoiceRecording(shouldSend = true) {
+      if (!voiceAudioProcessor) return;
+      clearTimeout(voiceRecordingTimeout);
+      voiceAudioProcessor.onaudioprocess = null;
+      voiceAudioProcessor.disconnect();
+      voiceAudioSource?.disconnect();
+      voiceSilenceGain?.disconnect();
+      const sampleRate = voiceAudioContext.sampleRate;
+      await voiceAudioContext.close().catch(() => {});
+      voiceAudioContext = null;
+      voiceAudioSource = null;
+      voiceAudioProcessor = null;
+      voiceSilenceGain = null;
+      voiceMessageButton.classList.remove('recording');
+      voiceMessageButton.setAttribute('aria-pressed', 'false');
+      voiceMessageButton.title = 'Sprachnachricht aufnehmen';
+
+      if (voiceRecorderOwnsStream) {
+        voiceRecorderStream?.getTracks().forEach((track) => track.stop());
+      }
+      voiceRecorderStream = null;
+      voiceRecorderOwnsStream = false;
+
+      const { blob: recording, hasSignal } = createWavRecording(voiceRecordingSamples, sampleRate);
+      voiceRecordingSamples = [];
+      if (!recording.size || !hasSignal) {
+        status.textContent = 'Kein Ton erkannt. Bitte Mikrofon prüfen und erneut aufnehmen.';
+        return;
+      }
+      if (!shouldSend || !socket.connected || !activeRoom) return;
+
+      status.textContent = 'Sende Sprachnachricht ...';
+      socket.emit('sendAudioMessage', {
+        mimeType: recording.type,
+        data: await recording.arrayBuffer(),
+      });
+    }
+
+    async function startVoiceRecording() {
+      if (!activeRoom || !socket.connected) return;
+
+      try {
+        voiceRecorderOwnsStream = !localMediaStream;
+        voiceRecorderStream = localMediaStream
+          ? new MediaStream(localMediaStream.getAudioTracks())
+          : await navigator.mediaDevices.getUserMedia({ audio: true });
+        const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+        if (!AudioContextClass) throw new Error('Web Audio is not supported');
+        voiceAudioContext = new AudioContextClass({ sampleRate: 48_000 });
+        await voiceAudioContext.resume();
+        voiceAudioSource = voiceAudioContext.createMediaStreamSource(voiceRecorderStream);
+        voiceAudioProcessor = voiceAudioContext.createScriptProcessor(4096, 1, 1);
+        voiceSilenceGain = voiceAudioContext.createGain();
+        voiceSilenceGain.gain.value = 0;
+        voiceRecordingSamples = [];
+        voiceAudioProcessor.onaudioprocess = (event) => {
+          voiceRecordingSamples.push(new Float32Array(event.inputBuffer.getChannelData(0)));
+        };
+        voiceAudioSource.connect(voiceAudioProcessor);
+        voiceAudioProcessor.connect(voiceSilenceGain);
+        voiceSilenceGain.connect(voiceAudioContext.destination);
+        voiceMessageButton.classList.add('recording');
+        voiceMessageButton.setAttribute('aria-pressed', 'true');
+        voiceMessageButton.title = 'Aufnahme stoppen';
+        status.textContent = 'Aufnahme läuft. Zum Stoppen erneut auf das Mikrofon klicken.';
+        voiceRecordingTimeout = setTimeout(() => {
+          stopVoiceRecording();
+        }, maxVoiceMessageDuration);
+      } catch (error) {
+        voiceAudioProcessor?.disconnect();
+        voiceAudioSource?.disconnect();
+        voiceSilenceGain?.disconnect();
+        await voiceAudioContext?.close().catch(() => {});
+        voiceAudioContext = null;
+        voiceAudioSource = null;
+        voiceAudioProcessor = null;
+        voiceSilenceGain = null;
+        voiceRecorderStream?.getTracks().forEach((track) => track.stop());
+        voiceRecorderStream = null;
+        voiceRecorderOwnsStream = false;
+        status.textContent = error?.name === 'NotAllowedError'
+          ? 'Mikrofonzugriff blockiert. Bitte die Browser-Berechtigung prüfen.'
+          : 'Die Sprachnachricht konnte nicht aufgenommen werden.';
+      }
+    }
+
+    voiceMessageButton.addEventListener('click', () => {
+      if (voiceAudioProcessor) stopVoiceRecording();
+      else startVoiceRecording();
+    });
 
 
     const audioCallButton = document.getElementById('audio-call');
@@ -266,6 +437,19 @@
       if (message) status.textContent = message;
     }
 
+    function mediaErrorMessage(error) {
+      if (error?.name === 'NotAllowedError' || error?.name === 'SecurityError') {
+        return 'Mikrofonzugriff blockiert. Bitte Browser-Berechtigung und HTTPS prüfen.';
+      }
+      if (error?.name === 'NotFoundError') {
+        return 'Kein Mikrofon oder keine Kamera gefunden.';
+      }
+      if (error?.name === 'NotReadableError') {
+        return 'Mikrofon oder Kamera wird gerade von einer anderen Anwendung verwendet.';
+      }
+      return 'Mikrofon oder Kamera konnte nicht gestartet werden. Bitte Gerät und Berechtigung prüfen.';
+    }
+
     async function prepareCallMedia(kind) {
       localMediaStream = await navigator.mediaDevices.getUserMedia({
         audio: true,
@@ -277,7 +461,7 @@
       if (kind === 'video') localVideo.srcObject = localMediaStream;
 
       peerConnection = new RTCPeerConnection({
-        iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
+        iceServers,
       });
       localMediaStream.getTracks().forEach((track) => {
         peerConnection.addTrack(track, localMediaStream);
@@ -345,9 +529,9 @@
         status.textContent = 'Anruf angenommen. Verbinde ...';
         incomingCallActions.hidden = true;
         incomingCallKind = null;
-      } catch {
+      } catch (error) {
         socket.emit('call:respond', { accepted: false });
-        finishCall('Mikrofon oder Kamera konnte nicht gestartet werden. Bitte Berechtigung prüfen.');
+        finishCall(mediaErrorMessage(error));
       }
     });
 
@@ -375,9 +559,9 @@
           signal: { type: 'offer', description: peerConnection.localDescription },
         });
         status.textContent = 'Anruf angenommen. Verbinde ...';
-      } catch {
+      } catch (error) {
         socket.emit('call:end', { callId });
-        finishCall('Mikrofon oder Kamera konnte nicht gestartet werden. Bitte Berechtigung prüfen.');
+        finishCall(mediaErrorMessage(error));
       }
     });
 
@@ -433,6 +617,7 @@
       historyLoaded = true;
       messageInput.disabled = false;
       sendButton.disabled = false;
+      voiceMessageButton.disabled = false;
       status.textContent = `Verbunden mit Raum: ${activeRoom}`;
       status.classList.remove('error');
       markIncomingMessagesAsRead();
@@ -444,6 +629,7 @@
       pendingMessages = [];
       messageInput.disabled = false;
       sendButton.disabled = false;
+      voiceMessageButton.disabled = false;
       status.textContent = `${message} Neue Nachrichten können weiterhin gesendet werden.`;
       status.classList.add('error');
     });
@@ -475,6 +661,7 @@
       pendingMessageText = '';
       messageInput.disabled = false;
       sendButton.disabled = false;
+      voiceMessageButton.disabled = false;
       messageInput.focus();
     });
 
